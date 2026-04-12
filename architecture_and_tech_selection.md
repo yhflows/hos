@@ -360,7 +360,7 @@ hos1-opus/
 ├── scripts/                   # 自动化脚本 (初始化/迁移/部署)
 ├── docs/                      # 架构文档/API 文档
 ├── frontend/
-│   ├── admin-web/             # React + Ant Design Pro
+│   ├── admin-web/             # Next.js 14+ + Tailwind CSS + shadcn/ui
 │   ├── patient-mp/            # Taro 小程序
 │   └── app/                   # Flutter App
 └── go.work                    # Go Workspace
@@ -429,7 +429,7 @@ hos1-opus/
 | IM | 自研轻量 → OpenIM(Phase2) | 🟡 分阶段 | MVP 用 WebSocket+微信，规模化后再引入 |
 | CMS | Go 自研 content-service | 🟢 推荐 | 避免引入 Node.js/Strapi 第三方技术栈 |
 | 对象存储 | MinIO | 🟢 推荐 | S3 兼容，牙片/影像存储 |
-| 前端(Admin) | React + Ant Design Pro | 🟢 推荐 | 企业管理系统标准方案 |
+| 前端(Admin) | Next.js 14+ + Tailwind CSS + shadcn/ui | 🟢 推荐 | 企业管理系统标准方案 |
 | 前端(小程序) | Taro 3.x | 🟢 推荐 | React 语法，一码两端 |
 | 前端(App) | Flutter | 🟢 推荐 | 一码两端，性能优秀 |
 | 前端(Win) | Tauri 2.x | 🟢 推荐 | 轻量桌面端，封装 Web |
@@ -671,3 +671,7 @@ Phase C (深度 AI):
 ---
 
 > **总结**: 本架构以 **Go-Zero 微服务 + PostgreSQL + Odoo(进销存) + APISIX 网关** 为核心骨架，通过 BFF 层解耦各端差异（管理端/患者端/微信端），以 **"MVP 做减法、Phase 2 做加法"** 为原则，在功能广度与交付速度之间取得最优平衡。技术栈控制在 **Go(主) + Python(Odoo)** 两栈以内，避免运维复杂度爆炸。AI 扩展采用 **零侵入数据管道 + 统一 AI Gateway** 的旁路设计，确保未来引入 AI 时不影响核心业务稳定性。
+
+### 13.7 AI 视觉层设计
+- **原则**: 零侵入前端业务表单，采用 AI Overlay 浮层展示推理结果（如牙片标注）。
+- **同步**: 通过 WebSocket 下发 AI 任务状态，前端实时渲染 SVG 覆盖层。
