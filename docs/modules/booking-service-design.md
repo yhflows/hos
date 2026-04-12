@@ -1,6 +1,6 @@
 # booking-service 详细设计草案
 
-> 状态: 草案 - 待团队评审
+> 状态: 草案 - v2 (已纳入后端评审意见)
 > 作者: @opus (布偶猫)
 > 创建日期: 2026-04-12
 
@@ -50,9 +50,13 @@
 | doctor_id | VARCHAR | 医生 ID | IDX |
 | department_id | VARCHAR | 科室 ID | IDX |
 | schedule_id | VARCHAR | 排班 ID | FK, IDX |
-| appointment_date | DATE | 预约日期 | IDX |
 | time_slot_id | VARCHAR | 时段 ID (复用 schedule 的 time_slot) | IDX |
 | status | VARCHAR | 预约状态 | IDX |
+| version | INT | 乐观锁版本号 | - |
+| idempotency_key | VARCHAR | 幂等键 (唯一约束) | UNIQUE |
+| reservation_token | VARCHAR | Redis 预占凭证 | - |
+| reservation_expires_at | TIMESTAMP | 预占凭证过期时间 | IDX |
+| is_extra | BOOLEAN | 是否加号 | - |
 | visit_type | VARCHAR | 就诊类型 (初诊/复诊/急诊) | - |
 | chief_complaint | TEXT | 主诉 | - |
 | symptoms | TEXT | 症状描述 | - |
@@ -68,6 +72,14 @@
 - `(tenant_id, status, appointment_date)` - 查询当日预约
 - `(tenant_id, patient_id, created_at DESC)` - 查询患者历史预约
 - `(tenant_id, doctor_id, appointment_date, status)` - 查询医生排班预约情况
+- `(tenant_id, idempotency_key)` - **UNIQUE** 幂等约束
+- `(tenant_id, reservation_expires_at)` - 清理过期预占
+
+**数据库硬约束**:
+- `UNIQUE(tenant_id, doctor_id, time_slot_id, status)` WHERE status IN ('pending', 'checked_in')
+  - 防止同一时段同一医生重复预约
+- `CHECK(version >= 0)` - 乐观锁版本号验证
+- `CHECK(reservation_expires_at > created_at OR reservation_expires_at IS NULL)` - 预占时间校验
 
 #### schedules (排班表，参考 clinic-service，这里记录预约关联)
 
@@ -101,6 +113,7 @@
 ```
                     ┌─────────────┐
                     │   Pending   │ (已预约)
+                    │ TTL: 15min  │
                     └──────┬──────┘
                            │
            ┌───────────────┼───────────────┐
@@ -122,12 +135,21 @@
 ```
 
 **状态说明**:
-- `pending`: 已预约，等待就诊
-- `checked_in`: 已签到，在队列中
-- `in_progress`: 正在就诊
-- `completed`: 就诊完成
-- `cancelled`: 已取消（患者主动取消或诊所取消）
-- `no_show`: 爽约（未在规定时间前签到）
+| 状态 | 含义 | 号源占用 | TTL/释放规则 |
+|------|------|---------|------------|
+| `pending` | 已预约，等待就诊 | ✅ 占用 | 15分钟未支付/未签到自动释放 |
+| `checked_in` | 已签到，在队列中 | ✅ 占用 | 无 TTL，手动流转或超时释放 |
+| `in_progress` | 正在就诊 | ✅ 占用 | 无 TTL，就诊完成手动流转 |
+| `completed` | 就诊完成 | ❌ 释放 | 终态，不可逆 |
+| `cancelled` | 已取消（患者主动或诊所取消） | ❌ 释放 | 终态，不可逆 |
+| `no_show` | 爽约（超过预约时间15分钟未签到） | ❌ 释放 | 终态，不可逆 |
+
+**状态转换约束**:
+- `pending → checked_in`: 必须在预约时间前 15 分钟内
+- `pending → cancelled`: 任何时间允许（可能涉及退费）
+- `pending → no_show`: 自动触发（定时任务扫描超时预约）
+- `checked_in → in_progress`: 仅医生或管理员可触发
+- `in_progress → completed`: 必须有实际就诊时间记录
 
 ---
 
@@ -142,6 +164,7 @@
 **请求**:
 ```json
 {
+  "idempotency_key": "req_abc123xyz",  // 幂等键，客户端生成 UUID
   "doctor_id": "doctor_123",
   "schedule_id": "schedule_456",
   "appointment_date": "2026-04-15",
@@ -157,13 +180,22 @@
 {
   "id": "apt_abc123",
   "status": "pending",
+  "version": 1,
   "appointment_date": "2026-04-15",
   "time_slot": "09:00-09:30",
+  "reservation_expires_at": "2026-04-15T09:15:00Z",
   "estimated_wait_time": 5,
   "check_in_window": {
     "start": "2026-04-15T08:30:00Z",
     "end": "2026-04-15T09:15:00Z"
-  }
+  },
+  // UX 视觉元数据 (投影字段，非核心写模型)
+  "visual_state": {
+    "color": "amber-500",
+    "icon": "clock-circle",
+    "animation": "pulse"
+  },
+  "ticket_url": "https://.../ticket/apt_abc123.png"  // 预约凭证卡片
 }
 ```
 
@@ -252,9 +284,37 @@
       "doctor_id": "doctor_123",
       "work_date": "2026-04-15",
       "shift_type": "上午",
+      // 日历热力图 (UX 投影字段)
+      "availability_heatmap": {
+        "date": "2026-04-15",
+        "score": 7,  // 0-10，值越大越充足
+        "color": "green-400"  // Tailwind 颜色类名
+      },
       "time_slots": [
-        {"id": "slot_001", "time": "09:00-09:30", "available": true, "capacity": 5, "booked": 2},
-        {"id": "slot_002", "time": "09:30-10:00", "available": false, "capacity": 5, "booked": 5}
+        {
+          "id": "slot_001",
+          "time": "09:00-09:30",
+          "available": true,
+          "capacity": 5,
+          "booked": 2,
+          "is_extra": false
+        },
+        {
+          "id": "slot_002",
+          "time": "09:30-10:00",
+          "available": false,
+          "capacity": 5,
+          "booked": 5,
+          "is_extra": false
+        },
+        {
+          "id": "slot_003",
+          "time": "10:00-10:30",
+          "available": true,
+          "capacity": 1,
+          "booked": 0,
+          "is_extra": true  // 加号，带 * 标识
+        }
       ]
     }
   ]
@@ -275,6 +335,7 @@
 | `appointment.started` | 开始就诊 | emr-service, push-service | 触发病历创建通知 |
 | `appointment.completed` | 就诊完成 | payment-service, emr-service | 触发费用计算 |
 | `appointment.no_show` | 爽约 | push-service, clinic-service | 发送爽约提醒 |
+| `appointment.near_miss` | 距预约10分钟 | push-service | 发送临近提醒，UI 倒计时变红 |
 
 ### 4.2 事件数据结构
 
@@ -298,49 +359,133 @@
 
 ## 5. 防超卖设计
 
-### 5.1 Redis 预扣 + 数据库事务确认
+### 5.1 完整预约流程 (Redis 预占 + 数据库硬约束 + 补偿)
 
 ```
-1. 预约请求到达
+1. 预约请求到达 (携带 idempotency_key)
    ↓
-2. Redis Lua 原子扣减号源
-   └─ 成功: 返回 ticket_id
+2. Redis Lua 原子预占号源
+   └─ 成功: 返回 reservation_token, expires_at (15分钟)
    └─ 失败: 返回号源已满
    ↓
-3. 创建预约（数据库事务）
-   └─ 成功: 发布事件，确认扣减
-   └─ 失败: Redis 回滚，释放号源
+3. 数据库事务 (同事务写入 appointments + outbox_events)
+   ├─ 幂等校验: WHERE idempotency_key = ? AND reservation_token = ?
+   ├─ 唯一约束: UNIQUE(tenant_id, doctor_id, time_slot_id, status)
+   └─ 乐观锁: UPDATE ... WHERE version = ? AND status = ?
    ↓
-4. Outbox Relay 发布事件
+4. 提交成功 → 确认扣减，Relay 发布事件
+   提交失败 → Redis 回滚，释放号源
+   ↓
+5. 补偿任务 (每分钟扫描)
+   └─ 清理过期的 reservation_token
+   └─ 对账: Redis 库存 vs 数据库 booked_count
 ```
 
 ### 5.2 Redis 数据结构
 
 ```
-# 号源库存
+# 号源库存 (计数器)
 booking:inventory:{tenant_id}:{schedule_id}:{time_slot_id} = count
 
-# 预约凭证 (TTL 15 分钟)
-booking:ticket:{ticket_id} = {patient_id, schedule_id, time_slot_id}
+# 预占凭证 (TTL 15 分钟)
+booking:reservation:{reservation_token} = {
+  "patient_id": "patient_123",
+  "schedule_id": "schedule_456",
+  "time_slot_id": "slot_001",
+  "expires_at": "2026-04-15T09:15:00Z"
+}
+
+# 幂等缓存 (TTL 1 小时，防止重复提交)
+booking:idempotency:{idempotency_key} = reservation_token
 ```
 
-### 5.3 Lua 脚本
+### 5.3 Lua 脚本 (预占号源)
 
 ```lua
--- 扣减号源
-local key = KEYS[1]
-local ticket_id = ARGV[1]
+-- 预占号源 (不直接扣减，仅生成凭证)
+local inventory_key = KEYS[1]
+local reservation_key_prefix = KEYS[2]
+local idempotency_key = ARGV[1]
 local patient_id = ARGV[2]
+local expires_at = ARGV[3]
+local ttl_seconds = ARGV[4]
 
-local count = redis.call('GET', key)
+-- 幂等检查: 已存在凭证则直接返回
+local existing_reservation = redis.call('GET', 'booking:idempotency:' .. idempotency_key)
+if existing_reservation then
+    return {2, existing_reservation}  -- 幂等成功
+end
+
+-- 检查库存
+local count = redis.call('GET', inventory_key)
 if not count or tonumber(count) <= 0 then
     return {0, nil}  -- 失败
 end
 
-redis.call('DECR', key)
-redis.call('SETEX', 'booking:ticket:' .. ticket_id, 900, patient_id)
-return {1, ticket_id}  -- 成功
+-- 扣减库存 + 生成预占凭证
+redis.call('DECR', inventory_key)
+local reservation_token = 'res_' .. idempotency_key .. '_' .. redis.call('TIME')[0]
+redis.call('SETEX', reservation_key_prefix .. reservation_token, ttl_seconds,
+    patient_id)
+
+-- 记录幂等映射
+redis.call('SETEX', 'booking:idempotency:' .. idempotency_key, 3600, reservation_token)
+
+return {1, reservation_token}  -- 成功
 ```
+
+### 5.4 数据库事务伪代码
+
+```go
+func CreateAppointment(ctx context.Context, req CreateAppointmentReq) error {
+    return db.Transaction(func(tx *gorm.DB) error {
+        // 1. 幂等检查
+        var existing Appointment
+        if err := tx.Where("idempotency_key = ?", req.IdempotencyKey).
+            First(&existing).Error; err == nil {
+            return ErrDuplicateAppointment  // 已存在
+        }
+
+        // 2. 唯一约束检查 (由数据库自动执行)
+        // UNIQUE(tenant_id, doctor_id, time_slot_id, status)
+
+        // 3. 乐观锁状态更新 (用于状态流转)
+        result := tx.Model(&Appointment{}).
+            Where("id = ? AND version = ?", req.ID, req.ExpectedVersion).
+            Updates(map[string]interface{}{
+                "status": req.NewStatus,
+                "version": gorm.Expr("version + 1"),
+            })
+        if result.RowsAffected == 0 {
+            return ErrConcurrentModification
+        }
+
+        // 4. 同事务写入 Outbox
+        outbox := OutboxEvent{
+            TenantID:     req.TenantID,
+            AggregateType: "appointment",
+            AggregateID:   appointment.ID,
+            EventType:     "appointment.created",
+            EventData:     eventData,
+            Published:     false,
+        }
+        if err := tx.Create(&outbox).Error; err != nil {
+            return err  // 整个事务回滚
+        }
+
+        return nil
+    })
+}
+```
+
+### 5.5 补偿链路
+
+| 场景 | 检测方式 | 补偿动作 |
+|------|---------|---------|
+| Lua 成功但 DB 事务失败 | Redis 存在 reservation_token 但数据库无对应记录 | 延迟任务扫描过期 reservation_token，回滚库存 |
+| DB 提交成功但 Redis 崩溃 | booked_count > Redis 库存 | 对账任务重建 Redis 状态 |
+| 客户端重复提交 | idempotency_key 冲突 | 返回已有预约，不重复创建 |
+| 预占超时未支付 | reservation_expires_at < NOW() | 自动释放号源，回滚库存 |
 
 ---
 
@@ -393,11 +538,37 @@ return {1, ticket_id}  -- 成功
 
 ## 9. 待讨论事项
 
+### 9.1 业务规则
+
 1. **爽约时间窗口**: 超过预约时间多久算爽约？（建议：超过 15 分钟）
 2. **取消预约退费规则**: 提前多久取消可全额退款？
-3. **叫号顺序**: 按预约时间 vs 按签到顺序？
+3. **叫号顺序**: 按预约时间 vs 按签到顺序？（建议：预约优先制）
 4. **跨天预约**: 是否支持跨时段预约？
 5. **加号处理**: 医生主动加号的流程如何设计？
+
+### 9.2 已采纳的团队建议
+
+| 来源 | 建议 | 状态 |
+|------|------|------|
+| @gemini | 日历热力图 + 预约凭证卡片 | ✅ 已纳入 (availability_heatmap, ticket_url) |
+| @gemini | 状态反馈视觉语义 (Amber/Cyan/醒目边框) | ✅ 已纳入 (visual_state 元数据) |
+| @gemini | 10分钟临近提醒 (UI 倒计时变红) | ✅ 已纳入 (appointment.near_miss 事件) |
+| @gemini | 加号标识 (带 * 号) | ✅ 已纳入 (is_extra 字段) |
+| @gpt52 | Redis Lua 只做短时占位，引入 idempotency_key | ✅ 已纳入 |
+| @gpt52 | 数据库硬约束 (唯一键 + 乐观锁) | ✅ 已纳入 |
+| @gpt52 | Outbox 同事务写入 | ✅ 已纳入 |
+| @gpt52 | 补偿链路 (过期清理 + 对账) | ✅ 已纳入 |
+
+### 9.3 设计原则总结
+
+| 原则 | 实现 |
+|------|------|
+| **单一真相源** | PostgreSQL 是最终真相源，Redis 仅作短时缓存 |
+| **幂等保证** | idempotency_key 唯一约束 + Redis 缓存 |
+| **并发安全** | Redis Lua 原子操作 + 数据库唯一约束 + 乐观锁 |
+| **补偿机制** | 过期预约清理 + Redis/DB 对账 |
+| **事件一致性** | Outbox 与业务变更同事务，commit 后才发布 |
+| **投影分离** | visual_state / availability_heatmap 只读投影，不进核心写模型 |
 
 ---
 
