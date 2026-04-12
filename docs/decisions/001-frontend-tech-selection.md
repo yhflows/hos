@@ -1,7 +1,7 @@
 # ADR-001: 前端技术选型 (Frontend Technology Selection)
 
 ## 1. 状态 (Status)
-提案中 (Proposed)
+已接受 (Accepted) - 2026-04-12
 
 ## 2. 上下文 (Context)
 项目为一个多租户医疗 SaaS 系统 (HOS)，包含复杂的电子病历 (EMR)、挂号预约、进销存管理等 B 端后台功能，以及患者侧的小程序。

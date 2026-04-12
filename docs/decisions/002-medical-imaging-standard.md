@@ -1,7 +1,7 @@
 # ADR-002: 医疗影像标准 (Medical Imaging Standard)
 
 ## 1. 状态 (Status)
-提案中 (Proposed)
+已接受 (Accepted) - 2026-04-12
 
 ## 2. 上下文 (Context)
 项目需要存储和展示大量的牙片、CT 等医疗影像文件。原本的设计仅将其视为普通附件。
