@@ -1,6 +1,6 @@
 # payment-service 详细设计草案
 
-> 状态: 草案 - 待团队评审
+> 状态: 草案 v2 - 已纳入团队评审意见
 > 作者: @opus (布偶猫)
 > 创建日期: 2026-04-12
 
@@ -30,7 +30,10 @@
 - **幂等保证**: 支付回调必须严格幂等，避免重复入账
 - **审计日志**: 所有资金操作必须记录完整审计日志
 - **最终一致性**: 跨服务事件通过 Outbox 模式发布
-- **对账机制**: 每日自动对账，发现异常及时告警
+- **对账机制**: 每日自动对账 + T+0 异常队列
+- **账单不可变性**: 账单必须固化价格快照，目录调价不影响历史账单
+- **退款余额约束**: 累计已退款 <= 原始已结算金额
+- **Append-Only Ledger**: 分配/退款记录只能追加，不可修改
 
 ---
 
@@ -50,10 +53,13 @@
 | tenant_id | VARCHAR | 租户 ID | FK, IDX |
 | encounter_id | VARCHAR | 就诊记录 ID (emr-service) | FK, IDX |
 | encounter_snapshot_hash | VARCHAR | 就诊快照哈希 (防篡改) | - |
+| catalog_version | VARCHAR | 定价目录版本号 (快照) | - |
 | status | VARCHAR | 账单状态 (pending/active/partial_paid/paid/cancelled) | IDX |
 | total_amount_cents | BIGINT | 总金额 (分) | - |
 | paid_amount_cents | BIGINT | 已付金额 (分) | - |
 | discount_amount_cents | BIGINT | 优惠金额 (分) | - |
+| insurance_coverage_cents | BIGINT | 保险抵扣金额 (分) | - |
+| patient_pay_cents | BIGINT | 患者自付金额 (分) | - |
 | created_at | TIMESTAMP | 创建时间 | IDX |
 | updated_at | TIMESTAMP | 更新时间 | - |
 
@@ -72,9 +78,13 @@
 | amount_cents | BIGINT | 金额 (分) | - |
 | discount_rate | DECIMAL(5,2) | 折扣率 | - |
 | discount_amount_cents | BIGINT | 折扣金额 (分) | - |
+| tax_rate | DECIMAL(5,2) | 税率 | - |
+| tax_amount_cents | BIGINT | 税额 (分) | - |
 | final_amount_cents | BIGINT | 最终金额 (分) | - |
 | item_type | VARCHAR | 项目类型 (service/medicine/material) | - |
 | item_id | VARCHAR | 项目 ID (关联定价) | IDX |
+| catalog_snapshot | JSONB | 定价快照 (item_code, item_name, unit_price_cents at bill time) | - |
+| clinical_context | JSONB | 临床上下文 (tooth_number, tooth_layer, diagnosis_code) - 仅投影 | - |
 | created_at | TIMESTAMP | 创建时间 | IDX |
 
 #### transactions (交易记录表)
@@ -98,6 +108,14 @@
 | paid_at | TIMESTAMP | 支付时间 | IDX |
 | refunded_at | TIMESTAMP | 退款时间 | IDX |
 | refund_amount_cents | BIGINT | 退款金额 (分) | - |
+| callback_event_id | VARCHAR | 回调事件 ID (追踪多次回调) | IDX |
+| signature | VARCHAR | 回调签名 (验签留存) | - |
+| callback_payload | JSONB | 回调原始 payload (审计) | - |
+| refundable_balance_cents | BIGINT | 可退余额 (校验字段) | IDX |
+| // UX 投影字段 (只读)
+| visual_state | JSONB | 视觉状态 (color, icon, animation) | - |
+| timeline_view | JSONB | 时间轴视图 (stages: [...]) | - |
+| coverage_breakdown | JSONB | 覆盖分解 (insurance, coupon, patient_pay) | - |
 | refund_reason | TEXT | 退款原因 | - |
 | metadata | JSONB | 附加元数据 | - |
 | created_at | TIMESTAMP | 创建时间 | IDX |
@@ -107,7 +125,32 @@
 - `(tenant_id, internal_no)` - 内部交易号查询
 - `(tenant_id, idempotency_key)` - 幂等键查询
 - `(tenant_id, provider_order_id)` - 第三方订单号查询
+- `(tenant_id, callback_event_id)` - 回调事件追踪
 - `(tenant_id, status, created_at DESC)` - 查询待处理交易
+
+**状态机约束**:
+- 状态只能单调递进：pending → success/failed → (refunded/partial_refunded)
+- 已支付交易不能修改金额
+- 已全额退款交易不能再退款
+
+**幂等策略**:
+- `idempotency_key`: 客户端生成，全局唯一
+- `internal_no`: 系统生成，租户内唯一
+- `callback_event_id`: 回调事件追踪，同一 provider_transaction_id 多次回调应关联
+- `signature`: 回调签名必须验证并存档
+
+**回调幂等处理流程**:
+```
+1. 收到回调，解析 provider_transaction_id
+   ↓
+2. 查询 `internal_no` 按 `provider_transaction_id`
+   ├─ 存在: 检查状态，更新回调 payload
+   └─ 不存在: 按幂等键查询，拒绝重复入账
+   ↓
+3. 存档 `callback_payload` 和 `signature` 到 callback_logs
+   ↓
+4. 同事务更新交易状态 + 记录 callback_logs
+```
 
 #### refunds (退款记录表)
 
@@ -127,6 +170,96 @@
 | provider_refund_id | VARCHAR | 第三方退款单号 | IDX |
 | created_at | TIMESTAMP | 创建时间 | IDX |
 | updated_at | TIMESTAMP | 更新时间 | IDX |
+
+**退款余额约束**:
+- 同一交易的累计已退款金额 <= 原始已结算金额
+- `refundable_balance_cents` 字段实时维护可退余额
+
+#### bill_allocations (账单分配记录 - Append-Only Ledger)
+
+| 字段名 | 类型 | 说明 | 索引 |
+|--------|------|------|------|
+| id | ULID | 主键 | PK |
+| tenant_id | VARCHAR | 租户 ID | FK, IDX |
+| bill_id | VARCHAR | 账单 ID | FK, IDX |
+| encounter_id | VARCHAR | 就诊记录 ID | FK, IDX |
+| transaction_id | VARCHAR | 关联交易 ID | FK, IDX |
+| allocation_type | VARCHAR | 分配类型 (payment/insurance/coupon/write_off) | IDX |
+| amount_cents | BIGINT | 分配金额 (分) | IDX |
+| channel | VARCHAR | 渠道 (direct/insurance_patient/insurance_clinic) | IDX |
+| reference_id | VARCHAR | 关联单号 (保险单号/优惠券号) | IDX |
+| reference_type | VARCHAR | 关联类型 (insurance_policy/coupon) | - |
+| created_at | TIMESTAMP | 创建时间 | IDX |
+
+**Append-Only 约束**:
+- 本表只能追加记录，禁止修改或删除
+- 用于拆分支付、保险抵扣、优惠券核销、坏账核销的审计追踪
+
+#### refund_allocations (退款分配记录 - Append-Only Ledger)
+
+| 字段名 | 类型 | 说明 | 索引 |
+|--------|------|------|------|
+| id | ULID | 主键 | PK |
+| tenant_id | VARCHAR | 租户 ID | FK, IDX |
+| refund_id | VARCHAR | 退款 ID | FK, IDX |
+| transaction_id | VARCHAR | 原交易 ID | FK, IDX |
+| allocation_type | VARCHAR | 分配类型 (refund_to_patient/refund_to_insurance/write_off) | IDX |
+| amount_cents | BIGINT | 分配金额 (分) | IDX |
+| channel | VARCHAR | 退款渠道 (original/payment_channel/refund_card) | IDX |
+| reference_id | VARCHAR | 关联单号 | - |
+| reference_type | VARCHAR | 关联类型 | - |
+| created_at | TIMESTAMP | 创建时间 | IDX |
+
+**Append-Only 约束**:
+- 本表只能追加记录，禁止修改或删除
+- 用于部分退款、退回保险、坏账核销的审计追踪
+
+#### callback_logs (支付回调日志 - 审计追溯)
+
+| 字段名 | 类型 | 说明 | 索引 |
+|--------|------|------|------|
+| id | ULID | 主键 | PK |
+| tenant_id | VARCHAR | 租户 ID | FK, IDX |
+| callback_event_id | VARCHAR | 回调事件 ID | IDX |
+| provider | VARCHAR | 支付提供商 (wechat/alipay) | IDX |
+| provider_order_id | VARCHAR | 第三方订单号 | IDX |
+| provider_transaction_id | VARCHAR | 第三方交易号 | IDX |
+| callback_payload | JSONB | 回调原始 payload | - |
+| signature | VARCHAR | 回调签名 | - |
+| signature_valid | BOOLEAN | 签名验证结果 | - |
+| received_at | TIMESTAMP | 接收时间 | IDX |
+| processed_at | TIMESTAMP | 处理时间 | IDX |
+| processing_duration_ms | INT | 处理耗时 | - |
+| error_message | TEXT | 错误信息 | - |
+| created_at | TIMESTAMP | 创建时间 | IDX |
+
+**回调日志用途**:
+- 审计追溯：所有支付回调必须记录
+- 重复检测：同一 provider_transaction_id 多次回调应关联
+- 故障排查：签名验证失败、处理超时等可追溯
+
+#### T+0 异常队列 (分钟级异常发现)
+
+| 字段名 | 类型 | 说明 | 索引 |
+|--------|------|------|------|
+| id | ULID | 主键 | PK |
+| tenant_id | VARCHAR | 租户 ID | FK, IDX |
+| anomaly_type | VARCHAR | 异常类型 (callback_timeout/transaction_missing/amount_mismatch/duplicate_notification) | IDX |
+| reference_id | VARCHAR | 关联 ID (transaction_id/internal_no) | IDX |
+| reference_type | VARCHAR | 关联类型 | - |
+| severity | VARCHAR | 严重程度 (critical/high/medium/low) | IDX |
+| detected_at | TIMESTAMP | 检测时间 | IDX |
+| resolved_at | TIMESTAMP | 解决时间 | IDX |
+| resolution | TEXT | 解决方案 | - |
+| status | VARCHAR | 状态 (pending/resolved/false_positive) | IDX |
+| created_at | TIMESTAMP | 创建时间 | IDX |
+
+**异常类型**:
+- `callback_timeout`: 回调超时未收到（已创建 pending 交易但超时未完成）
+- `transaction_missing`: 对账发现本地有但第三方没有
+- `amount_mismatch`: 金额不一致
+- `duplicate_notification`: 第三方重复通知
+- `refund_failed`: 退款失败需要人工介入
 
 #### pricing_catalogs (定价目录表)
 
@@ -494,6 +627,8 @@ payment:transaction:{tenant_id}:{internal_no} = {status, amount_cents, paid_at}
 
 ## 10. 待讨论事项
 
+### 10.1 业务规则
+
 1. **支付渠道**: 集成哪些支付渠道？（微信支付、支付宝、银联等）
 2. **定价体系**: 治疗项目定价策略如何设计？（统一价/医生差异化/时段差异化）
 3. **部分支付**: 是否支持部分支付？（预付款 + 到院后补齐）
@@ -502,9 +637,41 @@ payment:transaction:{tenant_id}:{internal_no} = {status, amount_cents, paid_at}
 6. **分期付款**: 是否支持分期付款？
 7. **退款规则**: 多久内可全额退款？手续费如何处理？
 
----
+### 10.2 已采纳的团队建议
 
-@gemini @gpt52
-以上是 `payment-service` 的详细设计草案。请从各自专业角度评审：
-- **@gemini**: 支付流程 UX 是否清晰？账单展示、支付状态反馈是否需要补充？
-- **@gpt52**: 幂等保证是否足够健壮？对账机制是否完整？并发控制是否有遗漏？
+| 来源 | 建议 | 状态 |
+|------|------|------|
+| @gemini | 诊疗关联式账单 (牙位图连线) | ✅ 已纳入 (catalog_snapshot clinical_context) |
+| @gemini | 支付状态情绪化设计 (Pending/Amber/Paid/Mint) | ✅ 已纳入 (visual_state) |
+| @gemini | 阶梯支付可视化 (进度条/还款日历) | ✅ 已纳入 (coverage_breakdown) |
+| @gemini | 动态定价卡片化后台 | ✅ 已纳入 (UX 建议) |
+| @gpt52 | 账务不可变模型 (bill_allocations/append-only ledger) | ✅ 已纳入 |
+| @gpt52 | 支付回调幂等 (callback_event_id/signature/原始日志) | ✅ 已纳入 |
+| @gpt52 | 账单价格快照 (catalog_version/tax_amount) | ✅ 已纳入 |
+| @gpt52 | T+0 异常队列 (分钟级异常发现) | ✅ 已纳入 |
+| @gpt52 | 退款余额约束 (累计已退款 <= 原始已结算) | ✅ 已纳入 |
+
+### 10.3 设计原则总结
+
+| 原则 | 实现 |
+|------|------|
+| **金额精度** | 所有金额使用 cents (BIGINT) 存储，避免浮点误差 |
+| **幂等保证** | idempotency_key + callback_event_id + signature 三重验证 |
+| **账务不可变** | 账单价格快照化，目录调价不影响历史账单 |
+| **Append-Only Ledger** | 分配/退款只能追加，不可修改 |
+| **状态单调性** | 交易状态只能单调递进，禁止逆向 |
+| **审计全覆盖** | 所有资金操作记录完整审计日志 |
+| **分钟级异常检测** | T+0 异常队列，及时发现支付问题 |
+| **退款余额校验** | 累计已退款 <= 原始已结算金额 |
+| **UX 投影分离** | 视觉字段只读，不进核心写模型 |
+
+### 10.4 测试用例需求
+
+| 场景 | 测试目标 |
+|------|---------|
+| 重复回调幂等 | 验证同一 provider_transaction_id 多次回调只处理一次 |
+| 部分退款/多次退款余额校验 | 验证退款余额约束，禁止超额退款 |
+| 目录调价历史账单不变 | 验证价格快照机制，目录调价不影响已生成账单 |
+| 对账差异补偿闭环 | 验证异常发现后的自动补偿机制 |
+
+---
