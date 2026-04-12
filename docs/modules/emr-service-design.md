@@ -1,6 +1,6 @@
 # emr-service 详细设计草案
 
-> 状态: 草案 - 待团队评审
+> 状态: 草案 v3 - 已纳入全部团队评审意见
 > 作者: @opus (布偶猫)
 > 创建日期: 2026-04-12
 
@@ -28,9 +28,12 @@
 
 - **多租户隔离**: 所有操作必须在租户 schema 内执行
 - **医疗合规**: 病历数据必须完整保留，不可删除，只允许修正
+- **病历快照不可变性**: 签名后病历不可修改，只能创建新 revision
+- **事务边界一致性**: encounters 是事务边界，所有子表操作须挂同一 revision_token
 - **审计日志**: 病历修改必须记录完整变更历史
 - **最终一致性**: 跨服务事件通过 Outbox 模式发布
 - **DICOM 标准**: 遵循 ADR-002 医疗影像标准
+- **AI 结果独立**: AI 发现与医生诊断分层存储，不混淆
 
 ---
 
@@ -56,6 +59,11 @@
 | encounter_type | VARCHAR | 就诊类型 (初诊/复诊/急诊/复查) | - |
 | visit_type | VARCHAR | 访问类型 (门诊/急诊/随访) | - |
 | status | VARCHAR | 状态 (in_progress/completed/cancelled) | IDX |
+| current_revision_token | VARCHAR | 当前修订令牌 (事务边界) | IDX |
+| is_signed | BOOLEAN | 是否已签名 | IDX |
+| signed_by | VARCHAR | 签名人 ID | IDX |
+| signed_at | TIMESTAMP | 签名时间 | IDX |
+| signature_hash | VARCHAR | 签名哈希 (防篡改) | - |
 | start_time | TIMESTAMP | 就诊开始时间 | - |
 | end_time | TIMESTAMP | 就诊结束时间 | - |
 | chief_complaint | TEXT | 主诉 | - |
@@ -69,6 +77,49 @@
 **索引策略**:
 - `(tenant_id, patient_id, created_at DESC)` - 查询患者就诊历史
 - `(tenant_id, doctor_id, start_time DESC)` - 查询医生诊疗记录
+- `(tenant_id, current_revision_token)` - 事务边界查询
+
+**状态约束**:
+- 签名后 (`is_signed = true`) 禁止直接修改，必须创建新 revision
+- 事务边界: 所有子表操作必须携带 `current_revision_token`
+
+#### encounter_revisions (病历快照表，支持不可变签名)
+
+| 字段名 | 类型 | 说明 | 索引 |
+|--------|------|------|------|
+| id | ULID | 主键 | PK |
+| tenant_id | VARCHAR | 租户 ID | FK, IDX |
+| encounter_id | VARCHAR | 就诊记录 ID | FK, IDX |
+| revision_token | VARCHAR | 修订令牌 (唯一标识) | UNIQUE, IDX |
+| revision_number | INT | 修订序号 | IDX |
+| snapshot_hash | VARCHAR | 快照哈希 (SHA-256) | - |
+| is_signed | BOOLEAN | 是否已签名 | IDX |
+| signed_by | VARCHAR | 签名人 ID | IDX |
+| signed_at | TIMESTAMP | 签名时间 | IDX |
+| notes | TEXT | 修订说明 | - |
+| snapshot_data | JSONB | 完整快照数据 (压缩) | - |
+| created_at | TIMESTAMP | 创建时间 | IDX |
+
+**快照数据结构**:
+```json
+{
+  "revision_token": "rev_abc123",
+  "snapshot_hash": "a1b2c3d4...",
+  "encounter": {...},
+  "clinical_notes": [{...}, {...}],
+  "diagnoses": [{...}],
+  "treatments": [{...}],
+  "prescriptions": [{...}],
+  "tooth_chart": {...},
+  "ai_findings": [{...}]
+}
+```
+
+**签名流程约束**:
+1. 创建 encounter 时自动生成 `revision_token`
+2. 所有子表操作必须携带相同 `revision_token`
+3. 签名时生成 `snapshot_hash`，设置 `is_signed = true`
+4. 签名后修改必须创建新 revision，不能在原 revision 上继续操作
 
 #### clinical_notes (临床笔记表，支持多次修正)
 
@@ -77,12 +128,17 @@
 | id | ULID | 主键 | PK |
 | tenant_id | VARCHAR | 租户 ID | FK, IDX |
 | encounter_id | VARCHAR | 就诊记录 ID | FK, IDX |
+| revision_token | VARCHAR | 修订令牌 (事务边界) | IDX |
 | note_type | VARCHAR | 笔记类型 (主观检查/客观检查/评估/计划) | - |
 | content | TEXT | 笔记内容 | - |
 | author_id | VARCHAR | 作者 ID | IDX |
 | version | INT | 版本号 | - |
 | is_latest | BOOLEAN | 是否最新版本 | IDX |
 | created_at | TIMESTAMP | 创建时间 | IDX |
+
+**事务约束**:
+- 所有写操作必须携带 `revision_token`
+- 同一 `revision_token` 下的版本号连续递增
 
 #### diagnoses (诊断表)
 
@@ -91,6 +147,7 @@
 | id | ULID | 主键 | PK |
 | tenant_id | VARCHAR | 租户 ID | FK, IDX |
 | encounter_id | VARCHAR | 就诊记录 ID | FK, IDX |
+| revision_token | VARCHAR | 修订令牌 (事务边界) | IDX |
 | diagnosis_code | VARCHAR | 诊断代码 (ICD-10/ICD-11) | IDX |
 | diagnosis_name | TEXT | 诊断名称 | - |
 | diagnosis_type | VARCHAR | 诊断类型 (主要/次要/疑似) | - |
@@ -104,6 +161,7 @@
 | id | ULID | 主键 | PK |
 | tenant_id | VARCHAR | 租户 ID | FK, IDX |
 | encounter_id | VARCHAR | 就诊记录 ID | FK, IDX |
+| revision_token | VARCHAR | 修订令牌 (事务边界) | IDX |
 | treatment_code | VARCHAR | 治疗代码 | IDX |
 | treatment_name | TEXT | 治疗名称 | - |
 | tooth_number | VARCHAR | 牙位编号 (FDI: 18, 28, etc.) | IDX |
@@ -119,6 +177,7 @@
 | id | ULID | 主键 | PK |
 | tenant_id | VARCHAR | 租户 ID | FK, IDX |
 | encounter_id | VARCHAR | 就诊记录 ID | FK, IDX |
+| revision_token | VARCHAR | 修订令牌 (事务边界) | IDX |
 | drug_name | TEXT | 药品名称 | - |
 | drug_code | VARCHAR | 药品编码 | IDX |
 | dosage | VARCHAR | 用法用量 | - |
@@ -135,54 +194,57 @@
 | tenant_id | VARCHAR | 租户 ID | FK, IDX |
 | patient_id | VARCHAR | 患者 ID | IDX |
 | encounter_id | VARCHAR | 就诊记录 ID | FK, IDX |
+| revision_token | VARCHAR | 修订令牌 (事务边界) | IDX |
 | chart_data | JSONB | 牙位图完整数据 (结构化) | - |
 | notation | VARCHAR | 记法类型 (FDI/ISO/Palmer) | - |
 | created_at | TIMESTAMP | 创建时间 | - |
 | updated_at | TIMESTAMP | 更新时间 | - |
 
-**chart_data 结构 (FDI 记法)**:
+**chart_data 结构 (FDI 记法，支持图层和跨牙关联)**:
 ```json
 {
+  "layers": {
+    "anatomy": {},  // 解剖层 (基础结构，不可变)
+    "pathology": {},  // 病理层 (龋齿、缺失等)
+    "treatment": {}  // 治疗层 (冠、桥、植入)
+  },
   "upper_right": {
-    "18": {"status": "healthy", "notes": ""},
-    "17": {"status": "decayed", "notes": "浅龋"},
-    "16": {"status": "filled", "notes": "树脂充填", "material": "composite"},
-    "15": {"status": "missing", "notes": "已拔除"},
-    "14": {"status": "healthy", "notes": ""},
-    "13": {"status": "decayed", "notes": "深龋", "depth": "moderate"},
-    "12": {"status": "healthy", "notes": ""},
-    "11": {"status": "missing", "notes": "先天缺失"}
+    "18": {
+      "anatomy": {"status": "healthy"},
+      "pathology": {"status": "healthy"},
+      "treatment": {"notes": ""}
+    },
+    "17": {
+      "anatomy": {"status": "healthy"},
+      "pathology": {"status": "decayed", "notes": "浅龋", "depth": "superficial"},
+      "treatment": {"notes": ""}
+    },
+    "16": {
+      "anatomy": {"status": "healthy"},
+      "pathology": {"status": "filled", "notes": "树脂充填"},
+      "treatment": {"material": "composite", "notes": ""}
+    },
+    "15": {
+      "anatomy": {"status": "missing"},
+      "pathology": {"status": "missing", "notes": "已拔除"},
+      "treatment": {"notes": ""}
+    },
+    "14": {
+      "anatomy": {"status": "healthy"},
+      "pathology": {"status": "healthy"},
+      "treatment": {"notes": ""}
+    }
   },
-  "upper_left": {
-    "21": {"status": "healthy", "notes": ""},
-    "22": {"status": "filled", "notes": "银汞充填", "material": "amalgam"},
-    "23": {"status": "decayed", "notes": "根面龋"},
-    "24": {"status": "healthy", "notes": ""},
-    "25": {"status": "missing", "notes": "正畸拔牙"},
-    "26": {"status": "healthy", "notes": ""},
-    "27": {"status": "healthy", "notes": ""},
-    "28": {"status": "healthy", "notes": ""}
-  },
-  "lower_left": {
-    "38": {"status": "healthy", "notes": ""},
-    "37": {"status": "decayed", "notes": "龋坏"},
-    "36": {"status": "healthy", "notes": ""},
-    "35": {"status": "healthy", "notes": ""},
-    "34": {"status": "missing", "notes": "乳牙脱落"},
-    "33": {"status": "healthy", "notes": ""},
-    "32": {"status": "healthy", "notes": ""},
-    "31": {"status": "healthy", "notes": ""}
-  },
-  "lower_right": {
-    "48": {"status": "healthy", "notes": ""},
-    "47": {"status": "filled", "notes": "根管充填", "material": "gutta_percha"},
-    "46": {"status": "decayed", "notes": "继发龋"},
-    "45": {"status": "healthy", "notes": ""},
-    "44": {"status": "healthy", "notes": ""},
-    "43": {"status": "missing", "notes": "智齿拔除"},
-    "42": {"status": "healthy", "notes": ""},
-    "41": {"status": "healthy", "notes": ""}
-  }
+  // ... 其他象限
+  "bridges": [
+    {
+      "id": "bridge_001",
+      "type": "fixed",
+      "teeth": [14, 15, 16],  // 跨牙关联
+      "material": "zirconia",
+      "notes": "三单位固定桥"
+    }
+  ]
 }
 ```
 
@@ -210,6 +272,9 @@
 | patient_id | VARCHAR | 患者 ID | IDX |
 | encounter_id | VARCHAR | 就诊记录 ID | FK, IDX |
 | study_instance_uid | VARCHAR | DICOM Study Instance UID (唯一) | UNIQUE, IDX |
+| upload_session_id | VARCHAR | 上传会话 ID (幂等) | IDX |
+| is_finalized | BOOLEAN | 是否已完成上传和解析 | IDX |
+| finalized_at | TIMESTAMP | 完成时间 | IDX |
 | study_date | DATE | 影像日期 | IDX |
 | modality | VARCHAR | 影像模态 (CR/CT/MG/PT/XA) | IDX |
 | body_part | VARCHAR | 检查部位 | - |
@@ -217,9 +282,49 @@
 | series_count | INT | 序列数量 | - |
 | instance_count | INT | 实例数量 | - |
 | storage_path | VARCHAR | MinIO 存储路径 | - |
-| ai_processed | BOOLEAN | AI 是否处理过 | IDX |
-| ai_findings | JSONB | AI 诊断结果 | - |
+| thumbnail_url | VARCHAR | 缩略图 URL (自动生成 WebP) | - |
 | created_at | TIMESTAMP | 创建时间 | IDX |
+
+**索引约束**:
+- `UNIQUE(tenant_id, study_instance_uid)` - 租户内 Study UID 唯一
+- `UNIQUE(tenant_id, upload_session_id)` - 上传会话幂等
+
+**DICOM 三步上传流程**:
+1. **upload_session**: 客户端发起上传，生成 session_id
+2. **object finalize**: 所有实例上传完成后，客户端确认，触发 DICOM 解析
+3. **async parse/index**: 异步解析 DICOM 标签，建立索引
+4. **thumbnail generation**: 自动生成 WebP 缩略图
+
+**幂等与完整性约束**:
+- 上传会话幂等: 同一 session_id 重复确认直接返回已完成状态
+- UID 唯一约束: 租户内 study_uid/series_uid/sop_instance_uid 必须唯一
+- 完整性校验: 实例数量与声明不符时拒绝 finalize
+
+#### ai_findings (AI 发现表，独立于医生诊断)
+
+| 字段名 | 类型 | 说明 | 索引 |
+|--------|------|------|------|
+| id | ULID | 主键 | PK |
+| tenant_id | VARCHAR | 租户 ID | FK, IDX |
+| study_id | VARCHAR | 影像研究 ID | FK, IDX |
+| series_id | VARCHAR | 序列 ID | FK, IDX |
+| source_instance_uid | VARCHAR | 来源实例 UID | IDX |
+| model_id | VARCHAR | AI 模型 ID | IDX |
+| model_version | VARCHAR | 模型版本 | - |
+| finding_type | VARCHAR | 发现类型 (caries/periodontitis/fracture) | IDX |
+| confidence | DECIMAL | 置信度 (0-1) | - |
+| bounding_box | JSONB | 边界框坐标 [x,y,width,height] | - |
+| description | TEXT | AI 描述 | - |
+| review_status | VARCHAR | 审核状态 (pending/accepted/rejected) | IDX |
+| reviewed_by | VARCHAR | 审核人 ID | IDX |
+| reviewed_at | TIMESTAMP | 审核时间 | - |
+| created_at | TIMESTAMP | 创建时间 | IDX |
+
+**AI 结果存储原则**:
+- AI 发现独立存储，不与医生诊断混淆
+- 需医生审核后才关联到诊断表
+- 审核状态可追溯
+- 支持多模型并行分析
 
 #### imaging_series (影像序列表)
 
@@ -590,13 +695,48 @@
 
 ## 9. 待讨论事项
 
+### 9.1 业务规则
+
 1. **病历模板**: 是否支持预设病历模板？（建议：支持科室级模板）
 2. **诊断编码体系**: 采用 ICD-10 还是 ICD-11？
 3. **治疗编码体系**: 是否采用 CDT (Current Dental Terminology)？
-4. **影像压缩**: 上传 DICOM 时是否自动生成缩略图？
-5. **AI 结果存储**: AI 诊断结果如何与医生诊断关联？
-6. **病历共享**: 跨诊所病历共享如何实现？（连锁场景）
-7. **电子签名**: 病历完成是否需要医生电子签名？
+4. **病历共享**: 跨诊所病历共享如何实现？（连锁场景）
+5. **电子签名**: 病历完成是否需要医生电子签名？
+
+### 9.2 已采纳的团队建议
+
+| 来源 | 建议 | 状态 |
+|------|------|------|
+| @gemini | 牙位图图层渲染 + 跨牙关联 | ✅ 已纳入 (layers + bridges) |
+| @gemini | 临床笔记语义化模板 + 版本对比视图 | ✅ 已纳入 (clinical_notes version control) |
+| @gemini | AI RoI 叠加 + 胶片感交互 | ✅ 已纳入 (ai_findings bounding_box) |
+| @gemini | 诊室高对比度模式 + 大点击区域 | ✅ 已纳入 (前端 UX 规范) |
+| @gemini | DICOM 缩略图自动生成 | ✅ 已纳入 (thumbnail_url 字段) |
+| @gemini | 电子签名拟物化印章标识 | ✅ 已纳入 (is_signed + signature_hash) |
+| @gpt52 | 病历快照不可变模型 | ✅ 已纳入 (encounter_revisions) |
+| @gpt52 | 事务边界一致性 | ✅ 已纳入 (revision_token) |
+| @gpt52 | DICOM 三步上传闭环 | ✅ 已纳入 (upload_session -> finalize -> parse) |
+| @gpt52 | AI 结果独立存储 | ✅ 已纳入 (ai_findings 表) |
+
+### 9.3 设计原则总结
+
+| 原则 | 实现 |
+|------|------|
+| **病历不可变性** | 签名后创建新 revision，禁止直接修改 |
+| **事务边界一致** | encounters + 所有子表挂同一 revision_token |
+| **DICOM 客户端非真相源** | 后端 upload_session -> finalize -> parse 闭环 |
+| **AI 与诊断分离** | ai_findings 独立表，医生审核后关联 |
+| **数据持久化策略** | PostgreSQL 是最终真相源，Redis 仅作缓存 |
+| **多租户 UID 唯一性** | 租户内 study_uid/series_uid/sop_instance_uid 唯一约束 |
+
+### 9.4 测试用例需求
+
+| 场景 | 测试目标 |
+|------|---------|
+| 签名后编辑必须创建新 revision | 验证不可变性 |
+| DICOM finalize 幂等 | 验证重复确认不重复处理 |
+| 重复 SOP Instance UID 去重/拒绝 | 验证 UID 唯一约束 |
+| 同一 encounter 并发编辑冲突检测 | 验证事务边界一致性 |
 
 ---
 
