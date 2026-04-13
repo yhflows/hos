@@ -195,26 +195,171 @@ const SignatureIndicator = {
 
 ### 5.3 视觉化设计
 
+#### 5.3.1 医疗数据视觉映射表 (Medical Data Visual Mapping)
+
+完整的医疗数据 diff 视觉映射定义：
+
 ```javascript
-// 关键医疗数据视觉映射
-const medicalDiffVisualizer = {
-  // 处方剂量变更 - 红色删除线 + 绿色高亮
+// 完整医疗数据视觉映射表
+const MedicalDiffVisualMapping = {
+  // 处方相关
   prescription_dose: {
-    old: '10mg',
-    new: '5mg',
+    label: '处方剂量',
     visual: {
       before: { color: '#EF4444', decoration: 'line-through' },
       after: { color: '#10B981', decoration: 'bold highlight' }
     }
   },
-  // 牙位图变更 - SVG diff
-  tooth_chart: {
-    old: 'treatment: #18',
-    new: 'treatment: #16, #20',
+  prescription_frequency: {
+    label: '用药频次',
     visual: {
-      before: { fill: '#9CA3AF' },
-      after: { fill: '#F59E0B' }
+      before: { color: '#EF4444' },
+      after: { color: '#10B981', background: '#ECFDF5' }
     }
+  },
+  prescription_duration: {
+    label: '用药周期',
+    visual: {
+      before: { color: '#9CA3AF', decoration: 'strikethrough' },
+      after: { color: '#F59E0B', font: 'bold' }
+    }
+  },
+
+  // 牙科相关
+  tooth_chart: {
+    label: '牙位图',
+    visual: {
+      before: { fill: '#9CA3AF', stroke: '#D1D5DB' },
+      after: { fill: '#F59E0B', stroke: '#D97706' }
+    }
+  },
+  tooth_status: {
+    label: '牙位状态',
+    visual: {
+      normal: { fill: '#FFFFFF', stroke: '#E5E7EB' },
+      treated: { fill: '#FEF3C7', stroke: '#F59E0B' },
+      missing: { fill: '#374151', stroke: '#111827' }
+    }
+  },
+
+  // 诊断相关
+  diagnosis_code: {
+    label: '诊断代码 (ICD-10)',
+    visual: {
+      before: { color: '#9CA3AF', font: 'monospace' },
+      after: { color: '#3B82F6', font: 'monospace', background: '#EFF6FF' }
+    }
+  },
+  diagnosis_name: {
+    label: '诊断名称',
+    visual: {
+      added: { color: '#10B981', icon: '➕' },
+      removed: { color: '#EF4444', icon: '➖' },
+      modified: { color: '#F59E0B', icon: '✏️' }
+    }
+  },
+
+  // 检查相关
+  lab_result: {
+    label: '检查结果',
+    visual: {
+      normal: { color: '#10B981', background: '#ECFDF5' },
+      abnormal: { color: '#EF4444', background: '#FEF2F2' },
+      borderline: { color: '#F59E0B', background: '#FFFBEB' }
+    }
+  },
+  lab_reference_range: {
+    label: '参考范围',
+    visual: {
+      before: { color: '#6B7280', border: 'dashed' },
+      after: { color: '#9CA3AF', border: 'solid' }
+    }
+  },
+
+  // 手术相关
+  surgery_type: {
+    label: '手术类型',
+    visual: {
+      before: { color: '#EF4444', decoration: 'line-through' },
+      after: { color: '#3B82F6', background: '#EFF6FF', border: '2px solid #2563EB' }
+    }
+  },
+  surgery_status: {
+    label: '手术状态',
+    visual: {
+      scheduled: { color: '#9CA3AF', icon: '📅' },
+      in_progress: { color: '#3B82F6', icon: '🏥' },
+      completed: { color: '#10B981', icon: '✅' },
+      cancelled: { color: '#EF4444', icon: '❌' }
+    }
+  },
+
+  // 费用相关
+  fee_amount: {
+    label: '费用金额',
+    visual: {
+      before: { color: '#EF4444', decoration: 'line-through' },
+      after: { color: '#10B981', font: 'bold' }
+    }
+  },
+  fee_type: {
+    label: '费用类型',
+    visual: {
+      medical: { color: '#3B82F6' },
+      pharmacy: { color: '#8B5CF6' },
+      examination: { color: '#EC4899' },
+      other: { color: '#9CA3AF' }
+    }
+  }
+};
+
+// Diff 渲染器
+const DiffRenderer = {
+  render: (field: string, oldValue: any, newValue: any) => {
+    const mapping = MedicalDiffVisualMapping[field];
+    if (!mapping) {
+      return this.renderJsonDiff(oldValue, newValue);
+    }
+
+    return this.renderVisualDiff(mapping, oldValue, newValue);
+  },
+
+  renderVisualDiff: (mapping: any, oldValue: any, newValue: any) => {
+    // 根据映射配置渲染视觉化 diff
+    const container = document.createElement('div');
+    container.className = 'diff-container';
+
+    // Before 节点
+    const beforeNode = this.createBeforeNode(mapping.visual.before, oldValue);
+    container.appendChild(beforeNode);
+
+    // After 节点
+    const afterNode = this.createAfterNode(mapping.visual.after, newValue);
+    container.appendChild(afterNode);
+
+    return container;
+  },
+
+  createBeforeNode: (visual: any, value: any) => {
+    const node = document.createElement('div');
+    node.className = 'diff-before';
+    Object.assign(node.style, visual);
+    node.textContent = value;
+    return node;
+  },
+
+  createAfterNode: (visual: any, value: any) => {
+    const node = document.createElement('div');
+    node.className = 'diff-after';
+    Object.assign(node.style, visual);
+    node.textContent = value;
+    return node;
+  },
+
+  renderJsonDiff: (oldValue: any, newValue: any) => {
+    // Fallback: 使用 JSON diff 库渲染
+    const diff = this.computeJsonDiff(oldValue, newValue);
+    return this.highlightJsonChanges(diff);
   }
 };
 ```
@@ -229,6 +374,326 @@ interface AuditTimeMachineProps {
 }
 ```
 
+#### 5.3.1 基础 Diff 展示组件 (Basic Diff Component)
+
+```typescript
+// Diff 类型定义
+type DiffType = 'added' | 'removed' | 'modified' | 'unchanged';
+
+interface DiffItem {
+  key: string;
+  path: string[];
+  oldValue: any;
+  newValue: any;
+  type: DiffType;
+}
+
+interface DiffViewerProps {
+  oldData: any;
+  newData: any;
+  diff: DiffItem[];
+  viewType?: 'json' | 'visual' | 'split';
+  expandDepth?: number;
+  showUnchanged?: boolean;
+}
+
+// Diff 视图组件
+const DiffViewer = {
+  // 渲染 JSON 格式 diff
+  renderJsonDiff: (props: DiffViewerProps) => {
+    const { diff, expandDepth = 2 } = props;
+
+    return (
+      <div className="diff-json-container">
+        {diff.map((item, index) => (
+          <DiffNode
+            key={item.key}
+            item={item}
+            depth={0}
+            maxDepth={expandDepth}
+          />
+        ))}
+      </div>
+    );
+  },
+
+  // 渲染视觉化 diff（医疗数据专用）
+  renderVisualDiff: (props: DiffViewerProps) => {
+    const { diff, viewType = 'visual' } = props;
+
+    return (
+      <div className="diff-visual-container">
+        {diff.map((item, index) => (
+          <VisualDiffItem key={item.key} item={item} />
+        ))}
+      </div>
+    );
+  },
+
+  // 渲染分屏 diff（左右对比）
+  renderSplitDiff: (props: DiffViewerProps) => {
+    const { oldData, newData, diff } = props;
+
+    return (
+      <div className="diff-split-container">
+        <div className="diff-panel diff-panel-before">
+          <h3>变更前</h3>
+          <CodeBlock data={oldData} />
+        </div>
+        <div className="diff-divider"></div>
+        <div className="diff-panel diff-panel-after">
+          <h3>变更后</h3>
+          <CodeBlock data={newData} />
+        </div>
+      </div>
+    );
+  }
+};
+
+// Diff 节点组件
+const DiffNode = ({ item, depth, maxDepth }: DiffNodeProps) => {
+  const { key, type, oldValue, newValue } = item;
+  const isExpanded = depth < maxDepth;
+  const hasChildren = Array.isArray(newValue) || typeof newValue === 'object';
+
+  const diffClass = {
+    added: 'diff-added',
+    removed: 'diff-removed',
+    modified: 'diff-modified',
+    unchanged: 'diff-unchanged'
+  }[type];
+
+  return (
+    <div className={`diff-node ${diffClass}`}>
+      <div className="diff-header">
+        <span className="diff-key">{key}</span>
+        <span className="diff-type-badge">{type}</span>
+      </div>
+
+      {hasChildren && isExpanded ? (
+        <div className="diff-children">
+          {Object.entries(newValue).map(([k, v]) => (
+            <DiffNode
+              key={k}
+              item={{
+                key: k,
+                type: type === 'unchanged' ? 'unchanged' : type,
+                oldValue: oldValue?.[k],
+                newValue: v
+              }}
+              depth={depth + 1}
+              maxDepth={maxDepth}
+            />
+          ))}
+        </div>
+      ) : (
+        <div className="diff-value">
+          {type === 'added' ? (
+            <span className="diff-value-added">{JSON.stringify(newValue)}</span>
+          ) : type === 'removed' ? (
+            <span className="diff-value-removed">{JSON.stringify(oldValue)}</span>
+          ) : (
+            <>
+              <span className="diff-value-removed">{JSON.stringify(oldValue)}</span>
+              <span className="diff-arrow">→</span>
+              <span className="diff-value-added">{JSON.stringify(newValue)}</span>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+```
+
+#### 5.3.2 Diff 样式定义
+
+```css
+/* Diff 容器 */
+.diff-json-container {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 14px;
+  line-height: 1.6;
+  padding: var(--spacing-4);
+  background: var(--bg-surface);
+  border-radius: var(--radius-md);
+}
+
+/* Diff 节点 */
+.diff-node {
+  padding-left: calc(var(--spacing-3) * var(--depth, 0));
+  border-left: 2px solid transparent;
+  transition: all 0.2s ease;
+}
+
+.diff-node:hover {
+  background: rgba(59, 130, 246, 0.05);
+  border-left-color: var(--primary-color);
+}
+
+/* Diff 头部 */
+.diff-header {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  margin-bottom: var(--spacing-1);
+}
+
+.diff-key {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* Diff 类型徽章 */
+.diff-type-badge {
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.diff-added .diff-type-badge {
+  background: #ECFDF5;
+  color: #065F46;
+}
+
+.diff-removed .diff-type-badge {
+  background: #FEF2F2;
+  color: #991B1B;
+}
+
+.diff-modified .diff-type-badge {
+  background: #FFFBEB;
+  color: #92400E;
+}
+
+.diff-unchanged .diff-type-badge {
+  background: #F3F4F6;
+  color: #374151;
+}
+
+/* Diff 值 */
+.diff-value {
+  padding: var(--spacing-2);
+  background: rgba(0, 0, 0, 0.02);
+  border-radius: var(--radius-sm);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.diff-value-added {
+  color: #10B981;
+}
+
+.diff-value-removed {
+  color: #EF4444;
+  text-decoration: line-through;
+  opacity: 0.7;
+}
+
+.diff-arrow {
+  margin: 0 var(--spacing-2);
+  color: var(--text-secondary);
+}
+
+/* Diff 子节点 */
+.diff-children {
+  margin-top: var(--spacing-2);
+  padding-left: var(--spacing-3);
+}
+
+/* 分屏 diff 容器 */
+.diff-split-container {
+  display: grid;
+  grid-template-columns: 1fr 2px 1fr;
+  gap: var(--spacing-4);
+  height: 100%;
+}
+
+.diff-panel {
+  padding: var(--spacing-4);
+  background: var(--bg-surface);
+  border-radius: var(--radius-md);
+  overflow: auto;
+}
+
+.diff-panel-before {
+  border-left: 3px solid #EF4444;
+}
+
+.diff-panel-after {
+  border-left: 3px solid #10B981;
+}
+
+.diff-divider {
+  background: #E5E7EB;
+  height: 100%;
+}
+
+/* 视觉化 diff 容器 */
+.diff-visual-container {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-3);
+}
+```
+
+#### 5.3.3 工具函数
+
+```typescript
+// Diff 计算工具
+const DiffCalculator = {
+  // 计算 JSON diff
+  compute: (oldObj: any, newObj: any): DiffItem[] => {
+    const diff: DiffItem[] = [];
+    const allKeys = new Set([...Object.keys(oldObj || {}), ...Object.keys(newObj || {})]);
+
+    for (const key of allKeys) {
+      const oldValue = oldObj?.[key];
+      const newValue = newObj?.[key];
+
+      if (oldValue === undefined) {
+        // 新增
+        diff.push({ key, path: [key], oldValue, newValue, type: 'added' });
+      } else if (newValue === undefined) {
+        // 删除
+        diff.push({ key, path: [key], oldValue, newValue, type: 'removed' });
+      } else if (!this.isEqual(oldValue, newValue)) {
+        // 修改
+        if (typeof oldValue === 'object' && typeof newValue === 'object') {
+          // 递归处理嵌套对象
+          const nestedDiff = this.compute(oldValue, newValue);
+          nestedDiff.forEach(item => {
+            item.path.unshift(key);
+          });
+          diff.push(...nestedDiff);
+        } else {
+          diff.push({ key, path: [key], oldValue, newValue, type: 'modified' });
+        }
+      }
+    }
+
+    return diff;
+  },
+
+  // 深度相等判断
+  isEqual: (a: any, b: any): boolean => {
+    if (a === b) return true;
+    if (typeof a !== typeof b) return false;
+    if (Array.isArray(a) && Array.isArray(b)) {
+      return a.length === b.length && a.every((v, i) => this.isEqual(v, b[i]));
+    }
+    if (typeof a === 'object' && typeof b === 'object') {
+      const keysA = Object.keys(a);
+      const keysB = Object.keys(b);
+      if (keysA.length !== keysB.length) return false;
+      return keysA.every(k => this.isEqual(a[k], b[k]));
+    }
+    return false;
+  }
+};
+```
+
 ### 5.4 实现优先级
 
 | 功能 | 优先级 | 说明 |
@@ -237,6 +702,149 @@ interface AuditTimeMachineProps {
 | 医疗数据视觉化 | P1 | 处方剂量、牙位图、诊断代码映射 |
 | 时间轴回放 | P2 | 拖动时间轴滑块，逐步展示变更 |
 | 导出报告 | P2 | PDF/Excel 导出审计记录 |
+
+### 5.5 审计日志导出 API 设计
+
+#### 5.5.1 API 规范
+
+```http
+# 异步导出请求
+POST /api/v1/audit/export
+Authorization: Bearer {jwt}
+Content-Type: application/json
+
+{
+  "filters": {
+    "tenant_id": "tenant_999",
+    "user_id": "user_123",
+    "resource_type": "appointment",
+    "action": "update",
+    "date_from": "2026-04-01T00:00:00Z",
+    "date_to": "2026-04-13T23:59:59Z"
+  },
+  "format": "pdf" | "excel" | "csv",
+  "include_phi": false,
+  "include_signature": true
+}
+
+# 响应
+{
+  "export_id": "export_ulid_456",
+  "status": "pending",
+  "expires_at": "2026-04-13T18:00:00Z",
+  "estimated_seconds": 30
+}
+
+# 查询导出状态
+GET /api/v1/audit/export/{export_id}
+
+# 响应
+{
+  "export_id": "export_ulid_456",
+  "status": "completed",
+  "download_url": "https://storage.hos.com/exports/tenant_999/audit_20260413.pdf?token=xyz",
+  "expires_at": "2026-04-13T18:00:00Z",
+  "created_at": "2026-04-13T17:00:00Z",
+  "completed_at": "2026-04-13T17:00:30Z",
+  "record_count": 1523
+}
+
+# 下载导出文件
+GET {download_url}
+```
+
+#### 5.5.2 权限控制
+
+| 操作 | 所需角色 | 权限 |
+|------|---------|------|
+| 创建导出任务 | admin | `audit:export` |
+| 查询导出状态 | admin | `audit:export` |
+| 下载导出文件 | admin | `audit:export` |
+
+#### 5.5.3 导出格式规范
+
+**PDF 格式：**
+- 包含封面页（导出时间、租户信息、导出人）
+- 目录页（按日期、资源类型、操作类型索引）
+- 每条审计记录独立页面
+- 数字签名印章（如果启用）
+- 水印（导出者 + 时间）
+
+**Excel 格式：**
+- 多工作表：按资源类型分表
+- 表头冻结
+- 条件格式标记（红色=删除、绿色=新增、黄色=修改）
+- 隐藏 PHI 列（默认）
+
+#### 5.5.4 安全约束
+
+```typescript
+// 导出安全验证
+interface AuditExportSecurity {
+  validate: (request: ExportRequest) => {
+    // 1. 租户隔离
+    if (request.tenant_id !== getCurrentTenantId()) {
+      throw new SecurityError('跨租户导出禁止');
+    }
+
+    // 2. 时间范围限制（最多 90 天）
+    const dateRange = new Date(request.date_to) - new Date(request.date_from);
+    if (dateRange > 90 * 24 * 60 * 60 * 1000) {
+      throw new ValidationError('导出时间范围不能超过 90 天');
+    }
+
+    // 3. PHI 导出需特殊权限
+    if (request.include_phi && !hasPermission('audit:export_phi')) {
+      throw new SecurityError('无权导出 PHI 数据');
+    }
+
+    // 4. 频率限制（每租户每小时最多 5 次）
+    const recentExports = await getRecentExports(request.tenant_id, '1h');
+    if (recentExports.length >= 5) {
+      throw new RateLimitError('导出请求过于频繁');
+    }
+
+    return { valid: true };
+  },
+
+  // 生成临时下载令牌（有效期 1 小时）
+  generateDownloadToken: (exportId: string) => {
+    const token = jwt.sign(
+      { export_id: exportId, exp: Date.now() + 3600000 },
+      process.env.EXPORT_SECRET
+    );
+    return `https://storage.hos.com/exports/${exportId}?token=${token}`;
+  }
+};
+```
+
+#### 5.5.5 审计日志导出记录
+
+```sql
+-- 审计导出记录表
+CREATE TABLE audit_exports (
+  id ULID PRIMARY KEY,
+  tenant_id VARCHAR NOT NULL,
+  export_id VARCHAR NOT NULL UNIQUE,
+  user_id VARCHAR NOT NULL,
+  filters JSONB NOT NULL,
+  format VARCHAR NOT NULL,
+  status VARCHAR NOT NULL,  -- pending | processing | completed | failed
+  file_url VARCHAR,
+  record_count INTEGER,
+  file_size_bytes INTEGER,
+  created_at TIMESTAMP NOT NULL,
+  completed_at TIMESTAMP,
+  expires_at TIMESTAMP NOT NULL,
+  INDEX idx_tenant_user (tenant_id, user_id, created_at DESC),
+  INDEX idx_export_id (export_id)
+);
+
+-- 状态变更约束
+CHECK (status IN ('pending', 'processing', 'completed', 'failed'))
+```
+
+---
 
 ## 6. 磁力排斥动画 (Critical Message Repulsion Effect)
 
