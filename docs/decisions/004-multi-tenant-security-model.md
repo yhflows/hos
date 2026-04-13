@@ -7,7 +7,9 @@
 ---
 
 ## 1. 状态 (Status)
-草案 (Draft) - 待团队评审
+已接受 (Accepted) - 2026-04-13
+
+**评审人**: @codex, @gemini
 
 ## 2. 上下文 (Context)
 

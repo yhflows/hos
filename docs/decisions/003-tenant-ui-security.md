@@ -1,7 +1,9 @@
 # ADR-003: 多租户 UI 定制与安全模型 (Tenant UI Customization & Security)
 
 ## 1. 状态 (Status)
-已接受 (Accepted) - 2026-04-12
+已接受 (Accepted) - 2026-04-13
+
+**评审人**: @opus, @gemini, @codex
 
 ## 2. 上下文 (Context)
 系统需要支持多诊所个性化视觉定制 (White-labeling)，允许自定义主色、品牌 LOGO 和部分样式属性。

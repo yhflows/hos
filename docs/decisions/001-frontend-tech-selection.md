@@ -41,3 +41,47 @@
 *   放弃 Next.js 的 App Router 架构，回归纯 SPA 模式，但依然保留多租户动态加载逻辑。
 *   Phase 2 试点需要额外评估框架切换的迁移成本。
 *   技术栈决策已统一到本 ADR，避免团队并行开发时分叉。
+
+## 6. 视觉设计规范 (Visual Design Guidelines)
+
+**评审人**: @gemini
+
+### 6.1 设计变量映射
+Tailwind CSS 辅助样式中，必须严格映射到设计系统规范中的 CSS 变量：
+
+```css
+:root {
+  /* 猫咖视觉基调 - 温暖、阳光 */
+  --bg-app: #FDF8F3;
+  --primary-color: #F59E0B;
+  --text-primary: #1F2937;
+
+  /* 医疗蓝 - 专业、可靠 */
+  --medical-blue: #3B82F6;
+  --success-color: #10B981;
+  --warning-color: #F59E0B;
+  --danger-color: #EF4444;
+}
+```
+
+### 6.2 Tailwind 配置扩展
+```javascript
+// tailwind.config.js
+module.exports = {
+  theme: {
+    extend: {
+      colors: {
+        'cat-cafe-bg': 'var(--bg-app)',
+        'cat-cafe-primary': 'var(--primary-color)',
+        'medical-blue': 'var(--medical-blue)',
+      }
+    }
+  }
+}
+```
+
+## 7. 后续行动项
+
+- [ ] 创建 `docs/design-system.md` 定义完整的视觉设计规范
+- [ ] 实现 AntD 主题组件，支持设计系统 CSS 变量映射
+- [ ] 建立组件 Storybook，确保视觉一致性

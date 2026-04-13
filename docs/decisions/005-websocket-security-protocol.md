@@ -7,7 +7,9 @@
 ---
 
 ## 1. 状态 (Status)
-草案 (Draft) - 待团队评审
+已接受 (Accepted) - 2026-04-13
+
+**评审人**: @codex, @gemini
 
 ## 2. 上下文 (Context)
 
@@ -104,3 +106,53 @@ push-service 需要确保：
 - 角色变更立即生效，无需等待下次重连
 - 高压下 critical 消息不丢失
 - 通知投影有足够的字段支持 UI 折叠和堆叠展示
+
+## 5. UX 视觉映射 (Visual Design Guidelines)
+
+**评审人**: @gemini
+
+### 5.1 智能堆叠 (Smart Stacking)
+利用 `collapse_key` 在 UI 层实现智能消息堆叠：
+
+```javascript
+// 同类型消息自动折叠
+if (collapseKey === 'appointment') {
+  // 5分钟内10条"挂号提醒"只弹出一个磁贴
+  renderCollapsedBubble({
+    icon: '🐾',
+    title: '10位新患者已挂号',
+    count: 10,
+    onExpand: () => showAllMessages()
+  });
+}
+```
+
+### 5.2 优先级视觉动效 (Priority Visual Effects)
+
+| 优先级 | 视觉动效 | 映射风格 |
+|---------|---------|---------|
+| `critical` | 缅因猫硬核边框警告 | 红色 + 脉冲动画 + 强制置顶 |
+| `normal` | 暹罗猫柔和圆角气泡 | 蓝色 + 轻微渐变 + 正常位置 |
+| `ephemeral` | 淡入淡出 | 灰色 + 半透明 + 位置靠后 |
+
+### 5.3 消息气泡组件规范
+
+```javascript
+// 组件 props 接口
+interface NotificationBubble {
+  messageId: string;      // 幂等键
+  seq: number;           // 顺序号
+  priority: 'critical' | 'normal' | 'ephemeral';
+  dedupeKey: string;     // 去重键
+  collapseKey: string;    // 折叠键
+  data: any;
+}
+```
+
+## 6. 后续行动项
+
+- [ ] 实现智能堆叠组件，支持同类型消息折叠
+- [ ] 实现优先级视觉动效库（critical/normal/ephemeral）
+- [ ] 建立消息气泡 Storybook，确保视觉一致性
+- [ ] 断连重连测试：验证 `last_acked_seq` 恢复机制
+- [ ] RBAC 变更测试：验证立即断开连接

@@ -7,7 +7,9 @@
 ---
 
 ## 1. 状态 (Status)
-草案 (Draft) - 待团队评审
+已接受 (Accepted) - 2026-04-13
+
+**评审人**: @codex, @gemini
 
 ## 2. 上下文 (Context)
 
@@ -92,3 +94,63 @@ GET /api/v1/audit/logs?
 - 即使前端被篡改，后端审计记录仍然可信
 - 前端快照功能受限，仅作辅助用途
 - 审计日志可能占用大量存储，需要归档策略
+
+## 5. 审计时光机组件 (Audit Time-Machine Component)
+
+**创意人**: @gemini
+
+### 5.1 组件设计目标
+审计日志不仅要展示 JSON diff，而是通过视觉化的方式降低审计人员的认知成本。
+
+### 5.2 视觉化设计
+
+```javascript
+// 关键医疗数据视觉映射
+const medicalDiffVisualizer = {
+  // 处方剂量变更 - 红色删除线 + 绿色高亮
+  prescription_dose: {
+    old: '10mg',
+    new: '5mg',
+    visual: {
+      before: { color: '#EF4444', decoration: 'line-through' },
+      after: { color: '#10B981', decoration: 'bold highlight' }
+    }
+  },
+  // 牙位图变更 - SVG diff
+  tooth_chart: {
+    old: 'treatment: #18',
+    new: 'treatment: #16, #20',
+    visual: {
+      before: { fill: '#9CA3AF' },
+      after: { fill: '#F59E0B' }
+    }
+  }
+};
+```
+
+### 5.3 组件接口
+
+```typescript
+interface AuditTimeMachineProps {
+  auditRecord: AuditLog;
+  medicalContext?: MedicalContext;
+  onDrillDown?: (recordId: string) => void;
+}
+```
+
+### 5.4 实现优先级
+
+| 功能 | 优先级 | 说明 |
+|------|---------|------|
+| 基础 diff 展示 | P0 | JSON 格式 diff，支持 before/after 切换 |
+| 医疗数据视觉化 | P1 | 处方剂量、牙位图、诊断代码映射 |
+| 时间轴回放 | P2 | 拖动时间轴滑块，逐步展示变更 |
+| 导出报告 | P2 | PDF/Excel 导出审计记录 |
+
+## 6. 后续行动项
+
+- [ ] 实现基础 diff 展示组件
+- [ ] 建立医疗数据视觉映射表
+- [ ] 实现时光机时间轴回放功能
+- [ ] 增加审计日志导出 API
+- [ ] 优化审计日志查询性能（分页、索引）
