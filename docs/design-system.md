@@ -297,8 +297,43 @@ const PHIMasker = {
     history: { regex: /.+/, replacement: '[已隐藏]' }
   },
 
-  canReveal: (props: PHIMaskProps): boolean => {
-    return props.isSelf || props.isAdmin;
+  // 解罩授权检查（完整闭环）
+  canReveal: (props: PHIMaskProps): { allowed: boolean, reason?: string } => {
+    // 1. 权限校验
+    if (!props.isSelf && !props.isAdmin) {
+      return { allowed: false, reason: '无权限：非本人且非管理员' };
+    }
+
+    // 2. 敏感数据类型特殊处理
+    if (props.type === 'idcard' && !props.isAdmin) {
+      return { allowed: false, reason: '身份证号仅管理员可查看' };
+    }
+
+    // 3. 二次确认要求（非本人展开需要审批）
+    if (!props.isSelf && props.isAdmin) {
+      return {
+        allowed: true,
+        reason: '需提供理由码并获得二次确认后允许'
+      };
+    }
+
+    return { allowed: true };
+  },
+
+  // 理由码定义（用于审计追溯）
+  reasonCodes: {
+    CLINICAL_NEED: 'clinical',      // 临床诊疗需要
+    INSURANCE_CLAIM: 'insurance',     // 保险理赔需要
+    LEGAL_COMPLIANCE: 'legal',       // 法律合规需要
+    PATIENT_REQUEST: 'patient_request', // 患者本人请求
+    SYSTEM_ADMIN: 'system_admin'       // 系统管理需要
+  },
+
+  // 展开权限等级
+  revealLevels: {
+    SELF: 'self',           // 本人：直接展开
+    ADMIN: 'admin',         // 管理员：需理由码
+    SUPER_ADMIN: 'super'      // 超级管理员：无需理由（需记录）
   }
 };
 ```
@@ -306,24 +341,117 @@ const PHIMasker = {
 #### 7.4.5 审计日志集成
 
 ```typescript
-// 展开敏感信息时记录审计
+// PHI 解罩完整流程
 const handlePHIReveal = async (props: PHIMaskProps) => {
-  if (!PHIMasker.canReveal(props)) {
-    return; // 无权限，拒绝展开
+  // 1. 权限检查
+  const authResult = PHIMasker.canReveal(props);
+  if (!authResult.allowed) {
+    // 记录拒绝访问审计
+    await auditLogger.log({
+      action: 'phi_reveal_denied',
+      resource_type: props.type,
+      user_id: props.currentUser,
+      metadata: {
+        denial_reason: authResult.reason,
+        attempted_value_length: props.value?.length
+      }
+    });
+    throw new SecurityError(authResult.reason);
   }
 
-  // 记录审计日志
+  // 2. 非本人展开需要理由码和二次确认
+  if (!props.isSelf) {
+    const reasonCode = await promptReasonCode();
+    if (!reasonCode) {
+      throw new ValidationError('请选择展开理由');
+    }
+
+    // 二次确认弹窗
+    const confirmed = await showConfirmDialog({
+      title: '确认展开患者敏感信息',
+      message: `您即将查看 ${props.type} 类型的 PHI 数据`,
+      warning: '此操作将被记录到审计日志',
+      requirePassword: true
+    });
+
+    if (!confirmed) {
+      // 记录取消展开审计
+      await auditLogger.log({
+        action: 'phi_reveal_cancelled',
+        resource_type: props.type,
+        user_id: props.currentUser,
+        metadata: {
+          reason_code: reasonCode,
+          cancelled_at: new Date().toISOString()
+        }
+      });
+      return;
+    }
+  }
+
+  // 3. 记录审计日志（完整字段）
   await auditLogger.log({
-    action: 'phi_reveal',
+    action: 'phi_reveal_success',
     resource_type: props.type,
     user_id: props.currentUser,
     metadata: {
-      revealed_length: props.value.length,
-      reason: 'user_request'
+      revealed_value_length: props.value.length,
+      reason_code: props.isSelf ? 'patient_request' : props.reasonCode,
+      reveal_level: props.isSelf ? PHIMasker.revealLevels.SELF : PHIMasker.revealLevels.ADMIN,
+      patient_id: props.patientId,
+      request_ip: getClientIP(),
+      request_ua: getUserAgent(),
+      confirmation_method: props.isSelf ? 'direct' : 'password',
+      session_id: getSessionId()
     }
   });
 
   props.onReveal?.();
+};
+
+// 理由码选择组件
+const ReasonCodeSelector = {
+  codes: Object.values(PHIMasker.reasonCodes),
+
+  labels: {
+    clinical: '临床诊疗需要',
+    insurance: '保险理赔需要',
+    legal: '法律合规需要',
+    patient_request: '患者本人请求',
+    system_admin: '系统管理需要'
+  },
+
+  render: () => (
+    <div className="reason-selector">
+      <h4>请选择展开理由</h4>
+      {Object.entries(ReasonCodeSelector.labels).map(([code, label]) => (
+        <button key={code} value={code}>
+          {label}
+        </button>
+      ))}
+    </div>
+  )
+};
+
+// 二次确认弹窗
+const ConfirmDialog = {
+  show: (props: ConfirmDialogProps) => {
+    const { title, message, warning, requirePassword } = props;
+
+    return (
+      <Modal title={title}>
+        <p>{message}</p>
+        {warning && <Alert type="warning">{warning}</Alert>}
+        {requirePassword && (
+          <Input type="password" placeholder="请输入密码确认" />
+        )}
+        <div className="dialog-actions">
+          <Button type="default">取消</Button>
+          <Button type="primary" danger>确认展开</Button>
+        </div>
+      </Modal>
+    );
+  }
 };
 ```
 
@@ -743,3 +871,130 @@ const ThemePreviewSandbox = {
   }
 };
 ```
+
+### 11.8 无障碍降级策略 (Accessibility Fallback)
+
+**遵循 WCAG 2.1**: 所有的动画和视觉特效必须支持 `prefers-reduced-motion` 和 `prefers-reduced-transparency` 媒体查询。
+
+```css
+/* 动画降级开关 */
+@media (prefers-reduced-motion: reduce) {
+  /* 禁用所有动画 */
+  .breathing-ripple-container *,
+  .notification-bubble[data-priority="critical"],
+  .trust-anchor,
+  .contrast-indicator {
+    animation: none !important;
+    transition: none !important;
+    transform: none !important;
+  }
+
+  /* 磁力排斥动画降级为静态高亮 */
+  .notification-bubble[data-priority="critical"] {
+    border: 2px solid var(--danger-color) !important;
+    background: #FEF2F2 !important;
+  }
+
+  /* 呼吸波纹降级为简单边框 */
+  .breathing-ripple {
+    display: none !important;
+  }
+}
+
+/* 静默模式（用户手动关闭所有动效）*/
+.silent-mode {
+  .breathing-ripple-container *,
+  .notification-bubble,
+  .trust-anchor,
+  .contrast-indicator {
+    animation: none !important;
+    transition: none !important;
+    transform: none !important;
+  }
+
+  /* Critical 消息降级为红色边框 */
+  .notification-bubble[data-priority="critical"] {
+    border: 3px solid var(--danger-color) !important;
+  }
+}
+```
+
+```typescript
+// 运行时检测用户偏好
+const AccessibilityPreferences = {
+  // 检测是否减少动画
+  prefersReducedMotion: (): boolean => {
+    if (typeof window === 'undefined') return false;
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  },
+
+  // 检测是否减少透明度
+  prefersReducedTransparency: (): boolean => {
+    if (typeof window === 'undefined') return false;
+    return window.matchMedia('(prefers-reduced-transparency: reduce)').matches;
+  },
+
+  // 获取静默模式状态（本地存储）
+  isSilentMode: (): boolean => {
+    try {
+      return localStorage.getItem('hos.silent_mode') === 'true';
+    } catch {
+      return false;
+    }
+  },
+
+  // 切换静默模式
+  toggleSilentMode: (enabled: boolean) => {
+    try {
+      localStorage.setItem('hos.silent_mode', String(enabled));
+      document.body.classList.toggle('silent-mode', enabled);
+    } catch {
+      console.error('Failed to toggle silent mode');
+    }
+  },
+
+  // 自动适配：当检测到用户偏好时自动降级
+  autoAdapt: () => {
+    const prefersReduced = this.prefersReducedMotion();
+    const isSilent = this.isSilentMode();
+
+    if (prefersReduced || isSilent) {
+      document.body.classList.add('reduced-motion');
+      console.info('Accessibility mode active: reduced animations');
+    } else {
+      document.body.classList.remove('reduced-motion');
+    }
+  }
+};
+
+// 组件初始化时调用
+useEffect(() => {
+  AccessibilityPreferences.autoAdapt();
+}, []);
+```
+
+#### 无障碍降级策略对照表
+
+| 动效名称 | 降级方式 | 预期效果 |
+|---------|---------|---------|
+| 呼吸波纹 | 移除 animation，隐藏 `.breathing-ripple` | 静态卡片边框 |
+| 磁力排斥动画 | 移除 animation，改为红色粗边框 | 高优先级消息静态高亮 |
+| Trust Anchor 悬停动画 | 移除 transform scale | 静态徽章 |
+| 通知气泡进入动画 | 移除 enter 动画 | 消息直接出现 |
+| 光晕效果 | 移除 box-shadow | 纯色块显示 |
+| 渐变背景 | 改为纯色背景 | 高对比度背景 |
+
+```css
+/* 降级模式统一样式 */
+.reduced-motion .notification-bubble {
+  transition: none !important;
+  animation: none !important;
+}
+
+.reduced-motion .notification-bubble[data-priority="critical"] {
+  border: 3px solid #EF4444;
+  background: #FEF2F2;
+  padding: var(--spacing-3) var(--spacing-4);
+}
+```
+
