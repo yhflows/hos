@@ -282,3 +282,329 @@ module.exports = {
 - [ ] 实现主题预览组件
 - [ ] 建立设计 token 与 Tailwind 的自动化映射
 - [ ] 制定可访问性 (Accessibility) 规范
+
+---
+
+## 11. 高级视觉特效 (Advanced Visual Effects)
+
+**设计人**: @gemini
+
+### 11.1 呼吸感微动效 (Breathing Ripple Effect)
+
+卡片边缘的淡蓝色波纹扩散效果，营造"生命力"和"温暖"的视觉体验。
+
+```css
+/* 呼吸感容器 */
+.breathing-ripple-container {
+  position: relative;
+  overflow: hidden;
+}
+
+/* 波纹动画 */
+@keyframes ripple-spread {
+  0% {
+    opacity: 0;
+    transform: scale(0.8);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1.2);
+  }
+}
+
+.breathing-ripple {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 200%;
+  height: 200%;
+  background: radial-gradient(circle, rgba(244, 230, 160, 0.4) 0%, rgba(244, 230, 160, 0.6));
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  animation: ripple-spread 2s ease-out;
+  pointer-events: none;
+}
+
+/* 交互触发 */
+.card-bubble:hover .breathing-ripple {
+  opacity: 1;
+}
+```
+
+### 11.2 对比度检查器 (Contrast Checker)
+
+实时检测配色对比度，确保满足 WCAG 2.1 标准。
+
+```typescript
+interface ContrastChecker {
+  check: (foregroundColor: string, backgroundColor: string) => {
+    const luminance = this.getLuminance(backgroundColor);
+    const textLuminance = this.getLuminance(foregroundColor);
+    return luminance > textLuminance ? luminance : null;
+  },
+  
+  getLuminance: (color: string) => {
+    const rgb = this.hexToRgb(color);
+    return 0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b;
+  },
+  
+  hexToRgb: (hex: string) => {
+    const result = /^#?([a-f\d]{2})([a-f\d]{2})$/.exec(hex);
+    return result ? {
+      r: parseInt(result[1], 16),
+      g: parseInt(result[2], 16),
+      b: parseInt(result[3], 16)
+    } : { r: 0, g: 0, b: 0 };
+  }
+};
+
+// UI 指示器
+const ContrastIndicator = {
+  good: { icon: 'check-circle', color: '#10B981', text: '对比度合格' },
+  warning: { icon: 'warning', color: '#F59E0B', text: '对比度偏低' },
+  fail: { icon: 'times-circle', color: '#EF4444', text: '不满足 WCAG 2.1' }
+};
+```
+
+### 11.3 色弱模拟器 (Color Blindness Simulator)
+
+模拟不同光照条件下的显示效果，验证色盲用户友好度。
+
+```typescript
+interface ColorBlindnessSimulator {
+  simulate: (baseColor: string, condition: 'protanopia' | 'deuteranopia' | 'tritanopia') => {
+    return this.adjustColor(baseColor, condition);
+  },
+  
+  adjustColor: (color: string, condition: string) => {
+    // 根据 ADR-007 (色盲适配) 的规则调整颜色
+    // protanopia: 红色感知困难
+    // deuteranopia: 绿色感知困难
+    // tritanopia: 蓝色感知困难
+    switch (condition) {
+      case 'protanopia':
+        // 提高红色成分
+        return this.shiftHue(color, 30);
+      case 'deuteranopia':
+        // 提高绿色成分
+        return this.shiftHue(color, -30);
+      case 'tritanopia':
+        // 调整明度/饱和度
+        return color;
+    }
+  },
+  
+  shiftHue: (color: string, degrees: number) => {
+    const hsl = this.hexToHsl(color);
+    return this.hslToHex({
+      h: (hsl.h + degrees) % 360,
+      s: hsl.s,
+      l: Math.max(20, Math.min(80, hsl.l)),
+      a: hsl.a
+    });
+  }
+};
+```
+
+### 11.4 信任锚点 (Trust Anchors - 详细设计)
+
+数字签名印章的视觉锚点设计详情。
+
+```css
+/* 信任锚点容器 */
+.trust-anchor {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 16px;
+  height: 16px;
+  
+  /* 微小的数字指纹图标 */
+  background: 
+    linear-gradient(135deg, rgba(244, 230, 160, 0.1) 0%, rgba(244, 230, 160, 0.05) 20%);
+  
+  border-radius: 2px;
+  border: 1px solid rgba(59, 130, 246, 0.2);
+  
+  font-size: 8px;
+  line-height: 1;
+  color: #6B7280;
+  font-weight: bold;
+}
+
+/* 悬停提示 */
+.trust-anchor:hover {
+  cursor: help;
+  transform: scale(1.2);
+  transition: transform 0.2s ease;
+}
+
+/* 工具提示 */
+.trust-anchor::before {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: 120%;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.9);
+  color: #6B7280;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 10px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.trust-anchor:hover::before {
+  opacity: 1;
+}
+```
+
+### 11.5 播放/暂停滑块 (Playback Slider)
+
+时光机的时间轴拖拽滑块控制。
+
+```typescript
+interface TimelineSliderProps {
+  minTime: string;      // 最小时间
+  maxTime: string;      // 最大时间
+  currentTime: string;  // 当前时间
+  isPlaying: boolean;    // 是否播放中
+  onSeek: (time: string) => void;
+  onPlayPause: () => void;
+}
+
+const TimelineSlider = {
+  render: (props: TimelineSliderProps) => {
+    const { minTime, maxTime, currentTime, isPlaying, onSeek, onPlayPause } = props;
+    
+    // 计算进度百分比
+    const progress = this.calculateProgress(minTime, maxTime, currentTime);
+    
+    return (
+      <div className="timeline-controls">
+        <button onClick={onPlayPause}>
+          {isPlaying ? '⏸' : '▶️'}
+        </button>
+        <input 
+          type="range"
+          min={minTime}
+          max={maxTime}
+          value={currentTime}
+          onChange={onSeek}
+          step="1000"
+        />
+        <div className="time-display">{this.formatTime(currentTime)}</div>
+        <div className="progress-bar">
+          <div style={{ width: `${progress}%` }} />
+        </div>
+      </div>
+    );
+  },
+  
+  calculateProgress: (min: string, max: string, current: string) => {
+    const minMs = new Date(min).getTime();
+    const maxMs = new Date(max).getTime();
+    const currentMs = new Date(current).getTime();
+    return ((currentMs - minMs) / (maxMs - minMs)) * 100;
+  },
+  
+  formatTime: (time: string) => {
+    return new Date(time).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+  }
+};
+```
+
+### 11.6 高对比度模式
+
+为强光环境或视觉障碍用户设计的高对比度切换模式。
+
+```css
+/* 高对比度模式 */
+.high-contrast-mode {
+  /* 强制所有文字使用高对比度颜色 */
+  --text-primary: #000000 !important;
+  --text-secondary: #1F2937 !important;
+  
+  /* 卡片背景使用高对比度 */
+  --card-bg: #FFFFFF !important;
+  --card-border: #000000 !important;
+  
+  /* 移除所有渐变和半透明效果 */
+  * {
+    background: transparent !important;
+    opacity: 1 !important;
+  }
+  
+  /* 按钮边框加深 */
+  .button-primary {
+    border: 2px solid #000000 !important;
+    box-shadow: none !important;
+  }
+}
+```
+
+### 11.7 安全沙箱 (Security Sandbox)
+
+主题预览在隔离沙箱环境中运行，防止恶意 CSS 注入。
+
+```typescript
+// 沙箱组件
+interface ThemePreviewSandbox {
+  themeConfig: ThemeConfig;
+  onApply: (config: ThemeConfig) => void;
+  onCancel: () => void;
+}
+
+const ThemePreviewSandbox = {
+  // CSP 配置
+  sandboxStyle: {
+    sandbox: 'allow-scripts',
+    'sandbox-allow-popups': false,
+    'sandbox-allow-same-origin': 'https://preview.hos.com'
+  },
+  
+  // 主题变量白名单
+  allowedTokens: [
+    'primary-color', 'bg-app', 'border-radius', 
+    'font-scale', 'logo-url'
+  ],
+  
+  validate: (config: ThemeConfig) => {
+    // 检查只包含允许的 token
+    const configKeys = Object.keys(config);
+    const invalidTokens = configKeys.filter(
+      key => !this.allowedTokens.includes(key)
+    );
+    
+    if (invalidTokens.length > 0) {
+      throw new Error(`不允许的配置项: ${invalidTokens.join(', ')}`);
+    }
+  },
+  
+  // 实时对比度检测
+  checkContrast: (primaryColor: string, textColor: string) => {
+    const contrastRatio = this.calculateContrastRatio(primaryColor, textColor);
+    if (contrastRatio < 4.5) {
+      console.warn(`对比度不足: ${contrastRatio.toFixed(2)}`);
+      return { valid: false, ratio: contrastRatio };
+    }
+    return { valid: true, ratio: contrastRatio };
+  },
+  
+  calculateContrastRatio: (fg: string, bg: string) => {
+    const fgLuminance = this.getLuminance(fg);
+    const bgLuminance = this.getLuminance(bg);
+    const lighter = Math.max(fgLuminance, bgLuminance);
+    const darker = Math.min(fgLuminance, bgLuminance);
+    return (lighter + 0.05) / (darker + 0.05);
+  },
+  
+  getLuminance: (color: string) => {
+    const rgb = this.hexToRgb(color);
+    return 0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b;
+  }
+};
+```
